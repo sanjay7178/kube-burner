@@ -1003,9 +1003,36 @@ And the quantiles document has the structure:
 
 This measurement can be used to collect Golang profiling information from processes running in pods from the cluster. To do so, kube-burner connects to pods labeled with `labelSelector` and running in `namespace`. This measurement uses an implementation similar to `kubectl exec`, and as soon as it connects to one pod it executes the command `curl <pprofURL>` to get the pprof data. pprof files are collected in a regular basis configured by the parameter `pprofInterval`, the collected pprof files are downloaded from the pods to the local directory configured by the parameter `pprofDirectory` which by default is `pprof`.
 
-As some components require authentication to get profiling information, `kube-burner` provides two different modalities to address it:
+### Node Process Profiling
+
+When `nodeAffinity` is configured, kube-burner deploys a DaemonSet with the specified node affinity to collect profiling information from node processes like kubelet and container runtime (cri-o). The DaemonSet pods run with privileged access and have the necessary permissions to access:
+
+- **Kubelet**: Accessible via HTTPS on port 10250 using ServiceAccount token authentication
+- **CRI-O**: Accessible via Unix socket at `/var/run/crio/crio.sock`
+
+Example configuration for node processes:
+
+```yaml
+  measurements:
+  - name: pprof
+    pprofInterval: 30m
+    pprofDirectory: pprof-data
+    nodeAffinity:
+      node-role.kubernetes.io/worker: ""
+    pprofTargets:
+    - name: kubelet-heap
+      url: https://localhost:10250/debug/pprof/heap
+
+    - name: crio-heap
+      url: unix:///var/run/crio/crio.sock/debug/pprof/heap
+```
+
+### Authentication Methods
+
+As some components require authentication to get profiling information, `kube-burner` provides different modalities to address it:
 
 - **Bearer token authentication**: This modality is configured by the variable `bearerToken`, which holds a valid Bearer token that will be used by cURL to get pprof data. This method is usually valid with kube-apiserver and kube-controller-managers components
+- **ServiceAccount authentication**: When `nodeAffinity` is configured, the DaemonSet pods use their ServiceAccount token to authenticate with kubelet
 - **Certificate Authentication**: Usually valid for etcd, this method can be configured using a combination of cert/privKey files or directly using the cert/privkey content, it can be tweaked with the following variables:
     - `cert`: Base64 encoded certificate.
     - `key`: Base64 encoded private key.
@@ -1038,7 +1065,9 @@ An example of how to configure this measurement to collect pprof HEAP and CPU pr
 ```
 
 !!! warning
-    As mentioned before, this measurement requires the `curl` command to be available in the target pods.
+    - This measurement requires the `curl` command to be available in the target pods.
+    - For node process profiling, a DaemonSet is deployed that requires cluster-admin or equivalent permissions to create ClusterRoles and ClusterRoleBindings.
+    - The DaemonSet pods run with privileged security context to access host resources.
 
 ## Measure subcommand CLI example
 

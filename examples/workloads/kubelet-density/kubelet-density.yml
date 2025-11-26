@@ -2,7 +2,17 @@
 global:
   gc: true
   measurements:
-   - name: podLatency
+  - name: pprof
+    pprofInterval: 30m
+    pprofDirectory: pprof-data
+    nodeAffinity:
+      kubernetes.io/hostname : "kubebrowse-cluster-worker"
+    pprofTargets:
+    - name: kubelet-heap
+      url: https://localhost:10250/debug/pprof/heap
+
+    # - name: crio-heap
+    #   url: unix:///var/run/crio/crio.sock/debug/pprof/heap
 jobs:
   - name: kubelet-density
     jobIterations: 25
@@ -14,8 +24,7 @@ jobs:
     waitWhenFinished: true
     podWait: false
     objects:
-
-      - objectTemplate: templates/pod.yml
+      - objectTemplate: ./examples/workloads/kubelet-density/templates/pod.yml
         replicas: 1
         inputVars:
           containerImage: registry.k8s.io/pause:3.1

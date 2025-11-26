@@ -44,7 +44,8 @@ import (
 type pprof struct {
 	BaseMeasurement
 
-	stopChannel chan bool
+	stopChannel       chan bool
+	daemonSetDeployed bool
 }
 
 type pprofLatencyMeasurementFactory struct {
@@ -77,6 +78,21 @@ func (p *pprof) Start(measurementWg *sync.WaitGroup) error {
 		log.Fatalf("Error creating pprof directory: %s", err)
 	}
 	p.stopChannel = make(chan bool)
+
+	// Check if node affinity is configured for any target
+	if p.needsDaemonSet() {
+		if err := p.deployDaemonSet(); err != nil {
+			log.Errorf("Failed to deploy pprof DaemonSet: %v", err)
+			return err
+		}
+		p.daemonSetDeployed = true
+		// Wait for DaemonSet pods to be ready
+		if err := p.waitForDaemonSetReady(); err != nil {
+			log.Errorf("DaemonSet pods failed to become ready: %v", err)
+			return err
+		}
+	}
+
 	p.getPProf(&wg, true)
 	wg.Wait()
 	go func() {
@@ -99,6 +115,22 @@ func (p *pprof) Start(measurementWg *sync.WaitGroup) error {
 }
 
 func (p *pprof) getPods(target types.PProftarget) []corev1.Pod {
+	// If node affinity is configured, use DaemonSet pods
+	if p.needsDaemonSet() {
+		labelSelector := labels.Set(map[string]string{"app": pprofDaemonSet}).String()
+		podList, err := p.ClientSet.CoreV1().Pods(pprofNamespace).List(context.TODO(), metav1.ListOptions{
+			LabelSelector: labelSelector,
+			FieldSelector: "status.phase=Running",
+		})
+		if err != nil {
+			log.Errorf("Error found listing DaemonSet pods: %s", err)
+			return []corev1.Pod{}
+		}
+		log.Infof("Found %d running DaemonSet pods for pprof collection", len(podList.Items))
+		return podList.Items
+	}
+
+	// Original implementation for label selector
 	labelSelector := labels.Set(target.LabelSelector).String()
 	podList, err := p.ClientSet.CoreV1().Pods(target.Namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
@@ -113,7 +145,14 @@ func (p *pprof) getPProf(wg *sync.WaitGroup, first bool) {
 	for pos, target := range p.Config.PProfTargets {
 		log.Infof("Collecting %s pprof", target.Name)
 		podList := p.getPods(target)
+
+		if len(podList) == 0 {
+			log.Warnf("No pods found for target %s, skipping collection", target.Name)
+			continue
+		}
+
 		for _, pod := range podList {
+			// ...existing cert handling code...
 			var cert, privKey io.Reader
 			if target.CertFile != "" && target.KeyFile != "" && first {
 				// target is a copy of one of the slice elements, so we need to modify the target object directly from the slice
@@ -140,7 +179,11 @@ func (p *pprof) getPProf(wg *sync.WaitGroup, first bool) {
 			wg.Add(1)
 			go func(target types.PProftarget, pod corev1.Pod) {
 				defer wg.Done()
-				pprofFile := fmt.Sprintf("%s-%s-%d.pprof", target.Name, pod.Name, time.Now().Unix())
+				nodeName := pod.Spec.NodeName
+				if nodeName == "" {
+					nodeName = pod.Name
+				}
+				pprofFile := fmt.Sprintf("%s-%s-%d.pprof", target.Name, nodeName, time.Now().Unix())
 				f, err := os.Create(path.Join(p.Config.PProfDirectory, pprofFile))
 				var stderr bytes.Buffer
 				if err != nil {
@@ -154,13 +197,31 @@ func (p *pprof) getPProf(wg *sync.WaitGroup, first bool) {
 						return
 					}
 				}
-				if target.BearerToken != "" {
-					command = []string{"curl", "-fsSLkH", fmt.Sprintf("Authorization: Bearer %s", target.BearerToken), target.URL}
-				} else if target.Cert != "" && target.Key != "" {
-					command = []string{"curl", "-fsSLk", "--cert", "/tmp/pprof.crt", "--key", "/tmp/pprof.key", target.URL}
+
+				// Determine command based on URL scheme
+				if p.needsDaemonSet() {
+					// For node processes (kubelet/cri-o)
+					if strings.HasPrefix(target.URL, "unix://") {
+						// Unix socket (cri-o)
+						socketPath := strings.TrimPrefix(target.URL, "unix://")
+						command = []string{"curl", "-fsSL", "--unix-socket", socketPath, "http://localhost/debug/pprof/heap"}
+					} else {
+						// HTTP endpoint (kubelet) - use ServiceAccount token
+						command = []string{"sh", "-c",
+							fmt.Sprintf("curl -fsSLk -H \"Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt %s", target.URL),
+						}
+					}
 				} else {
-					command = []string{"curl", "-fsSLk", target.URL}
+					// Original implementation for pod processes
+					if target.BearerToken != "" {
+						command = []string{"curl", "-fsSLkH", fmt.Sprintf("Authorization: Bearer %s", target.BearerToken), target.URL}
+					} else if target.Cert != "" && target.Key != "" {
+						command = []string{"curl", "-fsSLk", "--cert", "/tmp/pprof.crt", "--key", "/tmp/pprof.key", target.URL}
+					} else {
+						command = []string{"curl", "-fsSLk", target.URL}
+					}
 				}
+
 				req := p.ClientSet.CoreV1().
 					RESTClient().
 					Post().
@@ -168,7 +229,7 @@ func (p *pprof) getPProf(wg *sync.WaitGroup, first bool) {
 					Name(pod.Name).
 					Namespace(pod.Namespace).
 					SubResource("exec")
-				log.Debugf("Collecting pprof using URL: %s", req.URL())
+				log.Debugf("Collecting pprof from pod %s on node %s using command: %v", pod.Name, nodeName, command)
 				req.VersionedParams(&corev1.PodExecOptions{
 					Command:   command,
 					Container: pod.Spec.Containers[0].Name,
@@ -176,19 +237,21 @@ func (p *pprof) getPProf(wg *sync.WaitGroup, first bool) {
 					Stderr:    true,
 					Stdout:    true,
 				}, scheme.ParameterCodec)
-				log.Debugf("Executing %s in pod %s", command, pod.Name)
 				exec, err := remotecommand.NewSPDYExecutor(p.RestConfig, "POST", req.URL())
 				if err != nil {
 					log.Errorf("Failed to execute pprof command on %s: %s", target.Name, err)
+					return
 				}
 				err = exec.StreamWithContext(context.TODO(), remotecommand.StreamOptions{
 					Stdin:  nil,
 					Stdout: f,
 					Stderr: &stderr,
 				})
-				if err != nil {
-					log.Errorf("Failed to get pprof from %s: %s", pod.Name, stderr.String())
+				if err != nil || stderr.Len() > 0 {
+					log.Errorf("Failed to get pprof from %s on node %s: %s", pod.Name, nodeName, stderr.String())
 					os.Remove(f.Name())
+				} else {
+					log.Infof("Successfully collected pprof data: %s", pprofFile)
 				}
 			}(p.Config.PProfTargets[pos], pod)
 		}
@@ -202,6 +265,21 @@ func (p *pprof) Collect(measurementWg *sync.WaitGroup) {
 
 func (p *pprof) Stop() error {
 	p.stopChannel <- true
+
+	// Cleanup DaemonSet if deployed
+	if p.daemonSetDeployed {
+		ctx := context.TODO()
+		log.Infof("Cleaning up pprof DaemonSet resources")
+
+		p.ClientSet.AppsV1().DaemonSets(pprofNamespace).Delete(ctx, pprofDaemonSet, metav1.DeleteOptions{})
+		p.ClientSet.RbacV1().ClusterRoleBindings().Delete(ctx, pprofRoleBinding, metav1.DeleteOptions{})
+		p.ClientSet.RbacV1().ClusterRoles().Delete(ctx, pprofRole, metav1.DeleteOptions{})
+		p.ClientSet.CoreV1().ServiceAccounts(pprofNamespace).Delete(ctx, pprofSA, metav1.DeleteOptions{})
+		p.ClientSet.CoreV1().Namespaces().Delete(ctx, pprofNamespace, metav1.DeleteOptions{})
+
+		log.Infof("Cleaned up pprof DaemonSet resources")
+	}
+
 	return nil
 }
 
