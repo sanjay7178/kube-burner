@@ -330,10 +330,39 @@ func (p *pprof) buildVolumes(hostPath string, hostPathDirectoryOrCreate corev1.H
 	return volumes
 }
 
-func (p *pprof) getPprofNodeTargets(target types.PProftarget) (map[string]string, bool) {
-	if target.LabelSelector == nil {
+// getPprofNodeTargets determines if this is a node-level target and returns DaemonSet label selector
+// Returns (daemonSetLabels, isNodeTarget)
+// - isNodeTarget=true means we should use DaemonSet pods (for kubelet, crio, etc.)
+// - For targets with labelSelector but running via DaemonSet, we need special handling
+func (p *pprof) getPprofNodeTargets() (map[string]string, bool) {
+	// If DaemonSet is deployed, all collection goes through DaemonSet pods
+	if p.daemonSetDeployed {
 		return map[string]string{"app": types.PprofDaemonSet}, true
-	} else {
-		return nil, false
 	}
+	// No DaemonSet - use direct pod collection with labelSelector
+	return nil, false
+}
+
+// getTargetPodsForNode returns pods matching the labelSelector that are running on a specific node
+// This is used for pod-level targets (coredns, metrics-server) when collecting via DaemonSet
+func (p *pprof) getTargetPodsForNode(target types.PProftarget, nodeName string) []corev1.Pod {
+	if len(target.LabelSelector) == 0 {
+		return nil
+	}
+
+	labelSelector := labels.Set(target.LabelSelector).String()
+	namespace := target.Namespace
+	if namespace == "" {
+		namespace = corev1.NamespaceAll
+	}
+
+	podList, err := p.ClientSet.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: labelSelector,
+		FieldSelector: fmt.Sprintf("spec.nodeName=%s,status.phase=Running", nodeName),
+	})
+	if err != nil {
+		log.Errorf("Error listing pods for node %s with label %s: %s", nodeName, labelSelector, err)
+		return nil
+	}
+	return podList.Items
 }

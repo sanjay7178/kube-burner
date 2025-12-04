@@ -111,10 +111,12 @@ func (p *pprof) Start(measurementWg *sync.WaitGroup) error {
 }
 
 func (p *pprof) getPods(target types.PProftarget, pprofNodeTarget map[string]string, isNodeTarget bool) []corev1.Pod {
-	// If DaemonSet is deployed and no explicit label selector is provided, use DaemonSet pods
-	if isNodeTarget { // Node target
+	// When DaemonSet is deployed, always use DaemonSet pods for collection
+	// The DaemonSet pods have curl installed and can reach node-level endpoints
+	if isNodeTarget {
 		labelSelector := labels.Set(pprofNodeTarget).String()
-		podList, err := p.ClientSet.CoreV1().Pods(types.PprofNamespace).List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector,
+		podList, err := p.ClientSet.CoreV1().Pods(types.PprofNamespace).List(context.TODO(), metav1.ListOptions{
+			LabelSelector: labelSelector,
 			FieldSelector: "status.phase=Running",
 		})
 		if err != nil {
@@ -123,6 +125,7 @@ func (p *pprof) getPods(target types.PProftarget, pprofNodeTarget map[string]str
 		}
 		return podList.Items
 	}
+	// Direct pod collection (no DaemonSet) - use labelSelector to find target pods
 	labelSelector := labels.Set(target.LabelSelector).String()
 	podList, err := p.ClientSet.CoreV1().Pods(target.Namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
@@ -135,12 +138,12 @@ func (p *pprof) getPProf(wg *sync.WaitGroup, first bool) {
 	var err error
 	for pos, target := range p.Config.PProfTargets {
 		log.Infof("Collecting %s pprof", target.Name)
-		pprofNodeTarget, isNodeTarget := p.getPprofNodeTargets(target)
-		podList := p.getPods(target, pprofNodeTarget, isNodeTarget)
-		for _, pod := range podList {
+		pprofNodeTarget, isNodeTarget := p.getPprofNodeTargets()
+		daemonSetPods := p.getPods(target, pprofNodeTarget, isNodeTarget)
+
+		for _, daemonSetPod := range daemonSetPods {
 			var cert, privKey io.Reader
 			if target.CertFile != "" && target.KeyFile != "" && first {
-				// target is a copy of one of the slice elements, so we need to modify the target object directly from the slice
 				p.Config.PProfTargets[pos].Cert, p.Config.PProfTargets[pos].Key, err = readCerts(target.CertFile, target.KeyFile)
 				if err != nil {
 					log.Error(err)
@@ -161,78 +164,131 @@ func (p *pprof) getPProf(wg *sync.WaitGroup, first bool) {
 				cert = strings.NewReader(string(certData))
 				privKey = strings.NewReader(string(privKeyData))
 			}
-			wg.Add(1)
-			go func(target types.PProftarget, pod corev1.Pod) {
-				defer wg.Done()
 
-				// Determine identifier for filename
-				identifier := pod.Name
-				if p.daemonSetDeployed && len(target.LabelSelector) == 0 {
-					if nodeName := pod.Spec.NodeName; nodeName != "" {
-						identifier = nodeName
-						log.Infof("Collecting pprof from pod %s on node %s", pod.Name, nodeName)
-					}
+			// For targets with labelSelector, find target pods on the same node and collect from each
+			if p.daemonSetDeployed && len(target.LabelSelector) > 0 {
+				nodeName := daemonSetPod.Spec.NodeName
+				targetPods := p.getTargetPodsForNode(target, nodeName)
+				if len(targetPods) == 0 {
+					log.Warnf("No pods found for target %s on node %s with labelSelector %v", target.Name, nodeName, target.LabelSelector)
+					continue
 				}
 
-				pprofFile := fmt.Sprintf("%s-%s-%d.pprof", target.Name, identifier, time.Now().Unix())
-				f, err := os.Create(path.Join(p.Config.PProfDirectory, pprofFile))
-				var stderr bytes.Buffer
-				if err != nil {
-					log.Errorf("Error creating pprof file %s: %s", pprofFile, err)
-					return
+				for _, targetPod := range targetPods {
+					wg.Add(1)
+					go func(target types.PProftarget, collectorPod corev1.Pod, targetPod corev1.Pod) {
+						defer wg.Done()
+						p.collectPProfFromPod(target, collectorPod, &targetPod, cert, privKey, first)
+					}(p.Config.PProfTargets[pos], daemonSetPod, targetPod)
 				}
-				defer f.Close()
-				if cert != nil && privKey != nil && first {
-					if err = p.copyCertsToPod(pod, cert, privKey); err != nil {
-						log.Error(err)
-						return
-					}
-				}
-
-				command, pprofReq := p.buildPProfRequest(target, pod)
-
-				log.Debugf("Collecting pprof using URL: %s", pprofReq.URL())
-				pprofReq.VersionedParams(&corev1.PodExecOptions{
-					Command:   command,
-					Container: pod.Spec.Containers[0].Name,
-					Stdin:     false,
-					Stderr:    true,
-					Stdout:    true,
-				}, scheme.ParameterCodec)
-				log.Debugf("Executing %s in pod %s (namespace: %s)", command, pod.Name, pod.Namespace)
-				exec, err := remotecommand.NewSPDYExecutor(p.RestConfig, "POST", pprofReq.URL())
-				if err != nil {
-					log.Errorf("Failed to execute pprof command on %s: %s", target.Name, err)
-				}
-				err = exec.StreamWithContext(context.TODO(), remotecommand.StreamOptions{
-					Stdin:  nil,
-					Stdout: f,
-					Stderr: &stderr,
-				})
-				if err != nil {
-					log.Errorf("Failed to get pprof from %s: %s", pod.Name, stderr.String())
-					os.Remove(f.Name())
-				} else {
-					log.Infof("Successfully collected pprof data: %s", pprofFile)
-				}
-			}(p.Config.PProfTargets[pos], pod)
+			} else {
+				// Node-level target (kubelet, crio) or direct pod collection
+				wg.Add(1)
+				go func(target types.PProftarget, pod corev1.Pod) {
+					defer wg.Done()
+					p.collectPProfFromPod(target, pod, nil, cert, privKey, first)
+				}(p.Config.PProfTargets[pos], daemonSetPod)
+			}
 		}
 	}
 	wg.Wait()
 }
 
-func (p *pprof) buildPProfRequest(target types.PProftarget, pod corev1.Pod) ([]string, *rest.Request) {
+// collectPProfFromPod handles the actual pprof collection
+// collectorPod: the pod where curl is executed (DaemonSet pod or target pod itself)
+// targetPod: if not nil, the pod whose pprof endpoint we're collecting (for labelSelector targets)
+func (p *pprof) collectPProfFromPod(target types.PProftarget, collectorPod corev1.Pod, targetPod *corev1.Pod, cert, privKey io.Reader, first bool) {
+	// Determine identifier for filename
+	var identifier string
+	if targetPod != nil {
+		identifier = targetPod.Name
+		log.Infof("Collecting pprof from target pod %s via collector pod %s on node %s", targetPod.Name, collectorPod.Name, collectorPod.Spec.NodeName)
+	} else if p.daemonSetDeployed {
+		identifier = collectorPod.Spec.NodeName
+		log.Infof("Collecting pprof from pod %s on node %s", collectorPod.Name, collectorPod.Spec.NodeName)
+	} else {
+		identifier = collectorPod.Name
+	}
+
+	pprofFile := fmt.Sprintf("%s-%s-%d.pprof", target.Name, identifier, time.Now().Unix())
+	f, err := os.Create(path.Join(p.Config.PProfDirectory, pprofFile))
+	var stderr bytes.Buffer
+	if err != nil {
+		log.Errorf("Error creating pprof file %s: %s", pprofFile, err)
+		return
+	}
+	defer f.Close()
+
+	if cert != nil && privKey != nil && first {
+		if err = p.copyCertsToPod(collectorPod, cert, privKey); err != nil {
+			log.Error(err)
+			return
+		}
+	}
+
+	command, pprofReq := p.buildPProfRequest(target, collectorPod, targetPod)
+
+	log.Debugf("Collecting pprof using URL: %s", pprofReq.URL())
+	pprofReq.VersionedParams(&corev1.PodExecOptions{
+		Command:   command,
+		Container: collectorPod.Spec.Containers[0].Name,
+		Stdin:     false,
+		Stderr:    true,
+		Stdout:    true,
+	}, scheme.ParameterCodec)
+	log.Debugf("Executing %s in pod %s (namespace: %s)", command, collectorPod.Name, collectorPod.Namespace)
+	exec, err := remotecommand.NewSPDYExecutor(p.RestConfig, "POST", pprofReq.URL())
+	if err != nil {
+		log.Errorf("Failed to execute pprof command on %s: %s", target.Name, err)
+		return
+	}
+	err = exec.StreamWithContext(context.TODO(), remotecommand.StreamOptions{
+		Stdin:  nil,
+		Stdout: f,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		log.Errorf("Failed to get pprof from %s: %s", collectorPod.Name, stderr.String())
+		os.Remove(f.Name())
+	} else {
+		log.Infof("Successfully collected pprof data: %s", pprofFile)
+	}
+}
+
+// buildPProfRequest builds the curl command and REST request for pprof collection
+// collectorPod: the pod where curl is executed
+// targetPod: if not nil, the pod whose pprof endpoint we're collecting (for labelSelector targets via DaemonSet)
+func (p *pprof) buildPProfRequest(target types.PProftarget, collectorPod corev1.Pod, targetPod *corev1.Pod) ([]string, *rest.Request) {
 	var pprofReq *rest.Request
 	var command []string
 
-	// Build command based on target type
-	if p.daemonSetDeployed && len(target.LabelSelector) == 0 {
-		// Node-level collection via DaemonSet
-		if strings.HasPrefix(target.URL, "unix://") {
-			// Unix socket (CRI-O)
+	// When using DaemonSet for collection
+	if p.daemonSetDeployed {
+		if targetPod != nil {
+			// Pod-level target (coredns, metrics-server) collected via DaemonSet
+			// Use the target pod's IP to reach its pprof endpoint from the DaemonSet pod (hostNetwork)
+			podIP := targetPod.Status.PodIP
+			if podIP == "" {
+				log.Errorf("Target pod %s has no IP address", targetPod.Name)
+				return nil, nil
+			}
+
+			// Replace localhost in URL with pod IP
+			url := target.URL
+			url = strings.Replace(url, "localhost", podIP, 1)
+			url = strings.Replace(url, "127.0.0.1", podIP, 1)
+
+			if target.BearerToken != "" {
+				command = []string{"curl", "-fsSLk", "-H", fmt.Sprintf("Authorization: Bearer %s", target.BearerToken), url}
+			} else if target.Cert != "" && target.Key != "" {
+				command = []string{"curl", "-fsSLk", "--cert", "/tmp/pprof.crt", "--key", "/tmp/pprof.key", url}
+			} else {
+				command = []string{"curl", "-fsSLk", url}
+			}
+		} else if strings.HasPrefix(target.URL, "unix://") {
+			// Unix socket (CRI-O) - node-level
 			socketPath := strings.TrimPrefix(target.URL, "unix://")
 
-			// Extract the pprof path from target.URL or use default
 			pprofPath := "/debug/pprof/profile"
 			if strings.Contains(target.Name, "heap") {
 				pprofPath = "/debug/pprof/heap"
@@ -240,10 +296,9 @@ func (p *pprof) buildPProfRequest(target types.PProftarget, pod corev1.Pod) ([]s
 				pprofPath = "/debug/pprof/goroutine"
 			}
 
-			// Convert duration to seconds for CPU profiling
 			seconds := int(p.Config.PProfInterval.Seconds())
 			if seconds > 300 {
-				seconds = 30 // Cap at 30 seconds for CPU profiling
+				seconds = 30
 			}
 
 			command = []string{"curl", "-fsSLk",
@@ -252,22 +307,23 @@ func (p *pprof) buildPProfRequest(target types.PProftarget, pod corev1.Pod) ([]s
 			}
 			log.Debugf("Using unix socket: %s for %s", socketPath, pprofPath)
 		} else {
-			// HTTPS endpoint (kubelet) - use insecure since kubelet typically uses self-signed certs
+			// HTTPS/HTTP endpoint (kubelet, etc.) - node-level
 			command = []string{"sh", "-c",
 				fmt.Sprintf("curl -fsSLk -H \"Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" %s", target.URL),
 			}
 		}
+
 		pprofReq = p.ClientSet.CoreV1().
 			RESTClient().
 			Post().
 			Resource("pods").
-			Name(pod.Name).
+			Name(collectorPod.Name).
 			Namespace(types.PprofNamespace).
 			SubResource("exec")
 	} else {
-		// Pod-level collection (etcd, api-server, etc.)
+		// Direct pod-level collection (no DaemonSet) - exec into target pod
 		if target.BearerToken != "" {
-			command = []string{"curl", "-fsSLkH", fmt.Sprintf("Authorization: Bearer %s", target.BearerToken), target.URL}
+			command = []string{"curl", "-fsSLk", "-H", fmt.Sprintf("Authorization: Bearer %s", target.BearerToken), target.URL}
 		} else if target.Cert != "" && target.Key != "" {
 			command = []string{"curl", "-fsSLk", "--cert", "/tmp/pprof.crt", "--key", "/tmp/pprof.key", target.URL}
 		} else {
@@ -277,8 +333,8 @@ func (p *pprof) buildPProfRequest(target types.PProftarget, pod corev1.Pod) ([]s
 			RESTClient().
 			Post().
 			Resource("pods").
-			Name(pod.Name).
-			Namespace(pod.Namespace).
+			Name(collectorPod.Name).
+			Namespace(collectorPod.Namespace).
 			SubResource("exec")
 	}
 	return command, pprofReq
