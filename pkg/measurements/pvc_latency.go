@@ -303,7 +303,7 @@ func (p *pvcLatency) normalizeMetrics() float64 {
 		m.ChurnMetric = p.IsChurnMetric(m.Timestamp)
 		totalPVCs++
 		erroredPVCs += errorFlag
-		makeDoc := GenericLatencyDocFactory[int, *pvcLatencyLabels](m.Timestamp, &m.PvcLatencyLabels, &p.BaseMeasurement, pvcLatencyMeasurement)
+		makeDoc := GenericLatencyDocFactory[int, *pvcLatencyLabels](&m.PvcLatencyLabels, m.LatencyDocument)
 		p.NormLatencies = append(p.NormLatencies,
 			makeDoc(string(corev1.ClaimPending), m.PendingLatency),
 			makeDoc(string(corev1.ClaimBound), m.BindingLatency),

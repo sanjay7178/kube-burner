@@ -381,7 +381,7 @@ func (p *podLatency) normalizeMetrics() float64 {
 		m.ChurnMetric = p.IsChurnMetric(m.Timestamp)
 		totalPods++
 		erroredPods += errorFlag
-		makeDoc := GenericLatencyDocFactory[int, *podLatencyLabels](m.Timestamp, &m.PodLatencyLabels, &p.BaseMeasurement, podLatencyMeasurement)
+		makeDoc := GenericLatencyDocFactory[int, *podLatencyLabels](&m.PodLatencyLabels, m.LatencyDocument)
 		p.NormLatencies = append(p.NormLatencies,
 			makeDoc(string(corev1.PodScheduled), m.SchedulingLatency),
 			makeDoc(string(corev1.PodInitialized), m.InitializedLatency),

@@ -405,7 +405,7 @@ func (vmi *vmiLatency) normalizeMetrics() float64 {
 		m.JobName = vmi.JobConfig.Name
 		m.Metadata = vmi.Metadata
 		m.ChurnMetric = vmi.IsChurnMetric(m.Timestamp)
-		makeDoc := GenericLatencyDocFactory[int64, *vmiLatencyLabels](m.Timestamp, &m.VMILatencyLabels, &vmi.BaseMeasurement, vmiLatencyMeasurement)
+		makeDoc := GenericLatencyDocFactory[int64, *vmiLatencyLabels](&m.VMILatencyLabels, m.LatencyDocument)
 		vmi.NormLatencies = append(vmi.NormLatencies,
 			makeDoc("VM"+string(kvv1.VirtualMachineReady), m.VMReadyLatency),
 			makeDoc("VMICreated", m.VMICreatedLatency),

@@ -300,7 +300,7 @@ func (dv *dvLatency) normalizeMetrics() float64 {
 		dataVolumeCount++
 		erroredDataVolumes += errorFlag
 		// dv.NormLatencies = append(dv.NormLatencies, m)
-		makeDoc := GenericLatencyDocFactory[int, *dvLatencyLabels](m.Timestamp, &m.DVLatencyLabels, &dv.BaseMeasurement, dvLatencyMeasurement)
+		makeDoc := GenericLatencyDocFactory[int, *dvLatencyLabels](&m.DVLatencyLabels, m.LatencyDocument)
 
 		dv.NormLatencies = append(dv.NormLatencies,
 			makeDoc(string(cdiv1beta1.DataVolumeBound), m.DVBoundLatency),

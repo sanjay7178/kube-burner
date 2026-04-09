@@ -249,7 +249,7 @@ func (n *nodeLatency) normalizeLatencies() float64 {
 		m.NodeReadyLatency = int(m.NodeReady.Sub(earliest).Milliseconds())
 		m.ChurnMetric = n.IsChurnMetric(m.Timestamp)
 
-		makeDoc := GenericLatencyDocFactory[int, *nodeLatencyLabels](m.Timestamp, &m.NodeLatencyLabels, &n.BaseMeasurement, nodeLatencyMeasurement)
+		makeDoc := GenericLatencyDocFactory[int, *nodeLatencyLabels](&m.NodeLatencyLabels, m.LatencyDocument)
 
 		n.NormLatencies = append(n.NormLatencies,
 			makeDoc(string(corev1.NodeMemoryPressure), m.NodeMemoryPressureLatency),

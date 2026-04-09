@@ -351,7 +351,7 @@ func (vmiml *vmimLatency) normalizeMetrics() float64 {
 		m.ChurnMetric = vmiml.IsChurnMetric(m.Timestamp)
 		count++
 		errored += errorFlag
-		makeDoc := GenericLatencyDocFactory[int, *vmimLatencyLabels](m.Timestamp, &m.VMIMLatencyLabels, &vmiml.BaseMeasurement, vmimLatencyMeasurement)
+		makeDoc := GenericLatencyDocFactory[int, *vmimLatencyLabels](&m.VMIMLatencyLabels, m.LatencyDocument)
 
 		vmiml.NormLatencies = append(vmiml.NormLatencies,
 			makeDoc(string(kvv1.MigrationPending), m.PendingLatency),

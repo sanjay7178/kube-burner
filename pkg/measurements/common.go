@@ -98,18 +98,12 @@ type ConditionSetter interface {
 
 // GenericLatencyDocFactory creates a reusable closure to generate standard metrics.LatencyDocument outputs.
 // metadataLabels must be a pointer to a struct that implements ConditionSetter.
-func GenericLatencyDocFactory[T int | int64 | float64, L ConditionSetter](timestamp time.Time, metadataLabels L, base *BaseMeasurement, metricName string) func(condition string, valueMs T) metrics.LatencyDocument {
+// doc is passed by value, so each closure call returns a fresh copy with the updated condition and value.
+func GenericLatencyDocFactory[T int | int64 | float64, L ConditionSetter](metadataLabels L, doc metrics.LatencyDocument) func(condition string, valueMs T) metrics.LatencyDocument {
 	return func(condition string, valueMs T) metrics.LatencyDocument {
 		metadataLabels.SetCondition(condition)
-
-		return metrics.LatencyDocument{
-			Timestamp:  timestamp,
-			Labels:     metadataLabels,
-			Value:      float64(valueMs),
-			MetricName: metricName,
-			UUID:       base.Uuid,
-			JobName:    base.JobConfig.Name,
-			Metadata:   base.Metadata,
-		}
+		doc.Labels = metadataLabels
+		doc.Value = float64(valueMs)
+		return doc
 	}
 }
