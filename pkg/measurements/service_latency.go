@@ -67,9 +67,8 @@ type svcLatencyLabels struct {
 	Condition   string             `json:"condition"`
 }
 
-func (l *svcLatencyLabels) SetCondition(c string) {
-	l.Condition = c
-}
+func (l *svcLatencyLabels) SetCondition(c string)    { l.Condition = c }
+func (l *svcLatencyLabels) Clone() *svcLatencyLabels { c := *l; return &c }
 
 type svcMetric struct {
 	metrics.LatencyDocument

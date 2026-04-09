@@ -67,9 +67,8 @@ type podLatencyLabels struct {
 	Condition    string `json:"condition"`
 }
 
-func (l *podLatencyLabels) SetCondition(c string) {
-	l.Condition = c
-}
+func (l *podLatencyLabels) SetCondition(c string)    { l.Condition = c }
+func (l *podLatencyLabels) Clone() *podLatencyLabels { c := *l; return &c }
 
 type podMetric struct {
 	metrics.LatencyDocument

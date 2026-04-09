@@ -67,9 +67,8 @@ type dvLatencyLabels struct {
 	Condition    string `json:"condition"`
 }
 
-func (l *dvLatencyLabels) SetCondition(c string) {
-	l.Condition = c
-}
+func (l *dvLatencyLabels) SetCondition(c string)   { l.Condition = c }
+func (l *dvLatencyLabels) Clone() *dvLatencyLabels { c := *l; return &c }
 
 // dvMetric holds data about DataVolume creation process
 type dvMetric struct {

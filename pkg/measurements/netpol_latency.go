@@ -102,9 +102,8 @@ type netpolLatencyLabels struct {
 	Condition string `json:"condition"`
 }
 
-func (l *netpolLatencyLabels) SetCondition(c string) {
-	l.Condition = c
-}
+func (l *netpolLatencyLabels) SetCondition(c string)       { l.Condition = c }
+func (l *netpolLatencyLabels) Clone() *netpolLatencyLabels { c := *l; return &c }
 
 type netpolMetric struct {
 	metrics.LatencyDocument

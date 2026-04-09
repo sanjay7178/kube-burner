@@ -62,9 +62,8 @@ type jobLatencyLabels struct {
 	Condition    string `json:"condition"`
 }
 
-func (l *jobLatencyLabels) SetCondition(c string) {
-	l.Condition = c
-}
+func (l *jobLatencyLabels) SetCondition(c string)    { l.Condition = c }
+func (l *jobLatencyLabels) Clone() *jobLatencyLabels { c := *l; return &c }
 
 type jobMetric struct {
 	metrics.LatencyDocument

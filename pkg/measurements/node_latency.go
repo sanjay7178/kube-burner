@@ -54,9 +54,8 @@ type nodeLatencyLabels struct {
 	Condition string `json:"condition"`
 }
 
-func (l *nodeLatencyLabels) SetCondition(c string) {
-	l.Condition = c
-}
+func (l *nodeLatencyLabels) SetCondition(c string)     { l.Condition = c }
+func (l *nodeLatencyLabels) Clone() *nodeLatencyLabels { c := *l; return &c }
 
 type NodeMetric struct {
 	metrics.LatencyDocument

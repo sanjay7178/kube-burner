@@ -69,9 +69,8 @@ type vmimLatencyLabels struct {
 	Condition    string `json:"condition"`
 }
 
-func (l *vmimLatencyLabels) SetCondition(c string) {
-	l.Condition = c
-}
+func (l *vmimLatencyLabels) SetCondition(c string)     { l.Condition = c }
+func (l *vmimLatencyLabels) Clone() *vmimLatencyLabels { c := *l; return &c }
 
 // vmimMetric holds VirtualMachineInstanceMigration metrics
 type vmimMetric struct {

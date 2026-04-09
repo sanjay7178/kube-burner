@@ -64,9 +64,8 @@ type volumeSnapshotLabels struct {
 	Condition    string `json:"condition"`
 }
 
-func (l *volumeSnapshotLabels) SetCondition(c string) {
-	l.Condition = c
-}
+func (l *volumeSnapshotLabels) SetCondition(c string)        { l.Condition = c }
+func (l *volumeSnapshotLabels) Clone() *volumeSnapshotLabels { c := *l; return &c }
 
 // volumeSnapshotMetric holds data about VolumeSnapshot creation process
 type volumeSnapshotMetric struct {

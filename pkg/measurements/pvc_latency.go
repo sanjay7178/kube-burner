@@ -64,9 +64,8 @@ type pvcLatencyLabels struct {
 	Condition    string `json:"condition"`
 }
 
-func (l *pvcLatencyLabels) SetCondition(c string) {
-	l.Condition = c
-}
+func (l *pvcLatencyLabels) SetCondition(c string)    { l.Condition = c }
+func (l *pvcLatencyLabels) Clone() *pvcLatencyLabels { c := *l; return &c }
 
 type pvcMetric struct {
 	metrics.LatencyDocument

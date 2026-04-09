@@ -65,9 +65,8 @@ type vmiLatencyLabels struct {
 	Condition    string `json:"condition"`
 }
 
-func (l *vmiLatencyLabels) SetCondition(c string) {
-	l.Condition = c
-}
+func (l *vmiLatencyLabels) SetCondition(c string)    { l.Condition = c }
+func (l *vmiLatencyLabels) Clone() *vmiLatencyLabels { c := *l; return &c }
 
 // vmiMetric holds both pod and vmi metrics
 type vmiMetric struct {
