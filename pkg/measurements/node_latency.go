@@ -27,6 +27,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -94,14 +95,13 @@ func (n *nodeLatency) handleCreateNode(obj any) {
 		log.Errorf("failed to convert to Node: %v", err)
 		return
 	}
-	labels := node.Labels
 	n.Metrics.LoadOrStore(string(node.UID), NodeMetric{
 		Timestamp:  node.CreationTimestamp.UTC(),
 		Name:       node.Name,
 		MetricName: nodeLatencyMeasurement,
 		UUID:       n.Uuid,
 		JobName:    n.JobConfig.Name,
-		Labels:     labels,
+		Labels:     util.NormalizeLabels(node.Labels),
 		Metadata:   n.Metadata,
 	})
 }
@@ -162,6 +162,7 @@ func (n *nodeLatency) Start(measurementWg *sync.WaitGroup) error {
 						n.handleUpdateNode(newObj)
 					},
 				},
+				transform: nodeTransformFunc(),
 			},
 		},
 	)
@@ -202,7 +203,7 @@ func (n *nodeLatency) Collect(measurementWg *sync.WaitGroup) {
 			NodePIDPressure:    nodePIDPressure,
 			NodeReady:          nodeReady,
 			JobName:            n.JobConfig.Name,
-			Labels:             node.Labels,
+			Labels:             util.NormalizeLabels(node.Labels),
 		})
 	}
 }
@@ -251,4 +252,25 @@ func (n *nodeLatency) getLatency(normLatency any) map[string]float64 {
 
 func (n *nodeLatency) IsCompatible() bool {
 	return true
+}
+
+// nodeTransformFunc preserves the following fields for latency measurements:
+// - metadata: name, uid, creationTimestamp, labels
+// - status: conditions
+func nodeTransformFunc() cache.TransformFunc {
+	return func(obj interface{}) (interface{}, error) {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok {
+			return obj, nil
+		}
+
+		// Nodes don't have namespace
+		minimal := createMinimalUnstructured(u, metadataTransformOptions{includeLabels: true})
+
+		if conditions, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions"); found {
+			_ = unstructured.SetNestedSlice(minimal.Object, conditions, "status", "conditions")
+		}
+
+		return minimal, nil
+	}
 }

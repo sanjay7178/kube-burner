@@ -25,6 +25,7 @@ import (
 	"github.com/kube-burner/kube-burner/v2/pkg/util/fileutils"
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -128,7 +129,6 @@ func (p *pvcLatency) handleUpdatePVC(obj any) {
 		pm := value.(pvcMetric)
 		log.Tracef("handleUpdatePVC: PVC: [%s], Version: [%s], Phase: [%s]", pvc.Name, pvc.ResourceVersion, pvc.Status.Phase)
 		if pm.bound == 0 || pm.lost == 0 {
-			// https://pkg.go.dev/k8s.io/api/core/v1#PersistentVolumeClaimPhase
 			if pvc.Status.Phase == corev1.ClaimPending {
 				if pm.pending == 0 {
 					log.Debugf("PVC %s is pending", pvc.Name)
@@ -176,6 +176,7 @@ func (p *pvcLatency) Start(measurementWg *sync.WaitGroup) error {
 						p.handleUpdatePVC(newObj)
 					},
 				},
+				transform: pvcTransformFunc(),
 			},
 		},
 	)
@@ -259,4 +260,33 @@ func (p *pvcLatency) getLatency(normLatency any) map[string]float64 {
 func (p *pvcLatency) IsCompatible() bool {
 	_, exists := supportedPvcLatencyJobTypes[p.JobConfig.JobType]
 	return exists
+}
+
+// pvcTransformFunc preserves the following fields for latency measurements:
+// - metadata: name, namespace, uid, creationTimestamp, labels
+// - status: phase, conditions
+func pvcTransformFunc() cache.TransformFunc {
+	return func(obj interface{}) (interface{}, error) {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok {
+			return obj, nil
+		}
+
+		minimal := createMinimalUnstructured(u, defaultMetadataTransformOpts())
+
+		if phase, found, _ := unstructured.NestedString(u.Object, "status", "phase"); found {
+			_ = unstructured.SetNestedField(minimal.Object, phase, "status", "phase")
+		}
+		if conditions, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions"); found {
+			_ = unstructured.SetNestedSlice(minimal.Object, conditions, "status", "conditions")
+		}
+		if storageClassName, found, _ := unstructured.NestedString(u.Object, "spec", "storageClassName"); found {
+			_ = unstructured.SetNestedField(minimal.Object, storageClassName, "spec", "storageClassName")
+		}
+		if resources, found, _ := unstructured.NestedMap(u.Object, "spec", "resources"); found {
+			_ = unstructured.SetNestedMap(minimal.Object, resources, "spec", "resources")
+		}
+
+		return minimal, nil
+	}
 }

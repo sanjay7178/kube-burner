@@ -475,6 +475,7 @@ func readTemplate(o config.Object, embedCfg *fileutils.EmbedConfiguration) ([]by
 	if err != nil {
 		log.Fatalf("Error reading template %s: %s", o.ObjectTemplate, err)
 	}
+	defer f.Close()
 	t, err := io.ReadAll(f)
 	if err != nil {
 		log.Fatalf("Error reading template %s: %s", o.ObjectTemplate, err)
@@ -519,7 +520,7 @@ func (n *netpolLatency) Start(measurementWg *sync.WaitGroup) error {
 	var err error
 	defer measurementWg.Done()
 	// Skip latency measurement for 1st job which creates only pods
-	if value, ok := n.JobConfig.NamespaceLabels["kube-burner.io/skip-networkpolicy-latency"]; ok {
+	if value, ok := n.JobConfig.NamespaceLabels[config.KubeBurnerLabelSkipNetworkPolicyLatency]; ok {
 		if value == "true" {
 			log.Debugf("Discarding network policy latency measurement for the job %v", n.JobConfig.Name)
 			return nil
@@ -527,7 +528,7 @@ func (n *netpolLatency) Start(measurementWg *sync.WaitGroup) error {
 	}
 	_, err = n.ClientSet.CoreV1().Pods(networkPolicyProxy).Get(context.TODO(), networkPolicyProxy, metav1.GetOptions{})
 	if err != nil {
-		err = deployPodInNamespace(n.ClientSet, networkPolicyProxy, networkPolicyProxy, "quay.io/cloud-bulldozer/netpolproxy:latest", nil)
+		err = DeployPodInNamespace(n.ClientSet, networkPolicyProxy, networkPolicyProxy, "quay.io/cloud-bulldozer/netpolproxy:latest", nil)
 		if err != nil {
 			return err
 		}
@@ -559,6 +560,7 @@ func (n *netpolLatency) Start(measurementWg *sync.WaitGroup) error {
 				handlers: &cache.ResourceEventHandlerFuncs{
 					AddFunc: n.handleCreateNetpol,
 				},
+				transform: networkPolicyTransformFunc(),
 			},
 		},
 	)
@@ -568,7 +570,7 @@ func (n *netpolLatency) Start(measurementWg *sync.WaitGroup) error {
 
 func (n *netpolLatency) Stop() error {
 	// Skip latency measurement for 1st job which creates only pods
-	if value, ok := n.JobConfig.NamespaceLabels["kube-burner.io/skip-networkpolicy-latency"]; ok {
+	if value, ok := n.JobConfig.NamespaceLabels[config.KubeBurnerLabelSkipNetworkPolicyLatency]; ok {
 		if value == "true" {
 			return nil
 		}
@@ -627,4 +629,17 @@ func (n *netpolLatency) Collect(measurementWg *sync.WaitGroup) {
 func (n *netpolLatency) IsCompatible() bool {
 	_, exists := supportedNetpolLatencyJobTypes[n.JobConfig.JobType]
 	return exists
+}
+
+// networkPolicyTransformFunc preserves the following fields for latency measurements:
+// - metadata: name, namespace, uid, creationTimestamp
+func networkPolicyTransformFunc() cache.TransformFunc {
+	return func(obj interface{}) (interface{}, error) {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok {
+			return obj, nil
+		}
+
+		return createMinimalUnstructured(u, metadataTransformOptions{includeNamespace: true}), nil
+	}
 }
