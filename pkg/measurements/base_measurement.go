@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cloud-bulldozer/go-commons/v2/indexers"
 	"github.com/kube-burner/kube-burner/v2/pkg/config"
@@ -54,12 +55,13 @@ type BaseMeasurement struct {
 }
 
 type MeasurementWatcher struct {
-	dynamicClient dynamic.Interface
-	name          string
-	resource      schema.GroupVersionResource
-	labelSelector string
-	handlers      *cache.ResourceEventHandlerFuncs
-	transform     cache.TransformFunc
+	dynamicClient      dynamic.Interface
+	name               string
+	resource           schema.GroupVersionResource
+	labelSelector      string
+	skipGlobalSelector bool
+	handlers           *cache.ResourceEventHandlerFuncs
+	transform          cache.TransformFunc
 }
 
 func (bm *BaseMeasurement) startMeasurement(measurementWatchers []MeasurementWatcher) {
@@ -70,7 +72,7 @@ func (bm *BaseMeasurement) startMeasurement(measurementWatchers []MeasurementWat
 	bm.watchers = make([]*watchers.Watcher, len(measurementWatchers))
 	for i, measurementWatcher := range measurementWatchers {
 		var selectors []string
-		if bm.LabelSelector != "" {
+		if bm.LabelSelector != "" && !measurementWatcher.skipGlobalSelector {
 			selectors = []string{bm.LabelSelector}
 		}
 		if measurementWatcher.labelSelector != "" {
@@ -114,10 +116,6 @@ func (bm *BaseMeasurement) StopMeasurement(normalizeMetrics func() float64, getL
 	var err error
 	bm.stopWatchers()
 	errorRate := normalizeMetrics()
-	if errorRate > 10.00 {
-		log.Error("Latency errors beyond 10%. Hence invalidating the results")
-		return fmt.Errorf("something is wrong with system under test. %v latencies error rate was: %.2f", bm.MeasurementName, errorRate)
-	}
 	bm.calculateQuantiles(getLatency)
 	if len(bm.Config.LatencyThresholds) > 0 {
 		err = metrics.CheckThreshold(bm.Config.LatencyThresholds, bm.LatencyQuantiles)
@@ -126,7 +124,9 @@ func (bm *BaseMeasurement) StopMeasurement(normalizeMetrics func() float64, getL
 		pq := q.(metrics.LatencyQuantiles)
 		log.Infof("%s: %v 99th: %v ms max: %v ms avg: %v ms", bm.JobConfig.Name, pq.QuantileName, pq.P99, pq.Max, pq.Avg)
 	}
-	if errorRate > 0 {
+	if errorRate > 10.00 {
+		return fmt.Errorf("something is wrong with system under test. %v latencies error rate was: %.2f", bm.MeasurementName, errorRate)
+	} else if errorRate > 0 {
 		log.Infof("%v error rate was: %.2f", bm.MeasurementName, errorRate)
 	}
 	return err
@@ -134,6 +134,14 @@ func (bm *BaseMeasurement) StopMeasurement(normalizeMetrics func() float64, getL
 
 func (bm *BaseMeasurement) GetMetrics() *sync.Map {
 	return &bm.Metrics
+}
+
+// IsChurnMetric returns true if the given timestamp falls within the churn window
+func (bm *BaseMeasurement) IsChurnMetric(timestamp time.Time) bool {
+	if bm.JobConfig.ChurnStart != nil && bm.JobConfig.ChurnEnd != nil {
+		return timestamp.After(*bm.JobConfig.ChurnStart) && timestamp.Before(*bm.JobConfig.ChurnEnd)
+	}
+	return false
 }
 
 func (bm *BaseMeasurement) Index(jobName string, indexerList map[string]indexers.Indexer) {

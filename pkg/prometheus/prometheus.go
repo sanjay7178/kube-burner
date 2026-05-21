@@ -17,6 +17,7 @@ package prometheus
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"math"
 	"text/template"
 	"time"
@@ -64,18 +65,17 @@ func (p *Prometheus) ScrapeJobsMetrics(jobList ...Job) error {
 			continue
 		}
 		for _, metricProfile := range p.MetricProfiles {
-			log.Infof("🔍 Endpoint: %v; profile: %v start: %v end: %v; job: %v, metricsClosing: %v", p.Endpoint,
-				metricProfile.name,
+			log.Infof("🔍 Collecting prometheus metrics for job %s; endpoint: %v; profile: %v ", eachJob.JobConfig.Name, p.Endpoint, metricProfile.name)
+			log.Infof("start: %v; end: %v; metrics closing: %v",
 				jobStart.Format(time.RFC3339),
 				jobEnd.Format(time.RFC3339),
-				eachJob.JobConfig.Name,
 				eachJob.JobConfig.MetricsClosing)
 			for _, metric := range metricProfile.metrics {
 				docsToIndex := make(map[string][]any, 2)
 				requiresInstant := false
 				t, _ := template.New("").Parse(metric.Query)
 				if err := t.Execute(&renderedQuery, vars); err != nil {
-					log.Warnf("Error rendering query: %v", err)
+					log.Warnf("Error rendering query from metric %s: %v", metric.MetricName, err)
 					continue
 				}
 				query := renderedQuery.String()
@@ -160,6 +160,11 @@ func (p *Prometheus) ReadProfile(location string, embedCfg *fileutils.EmbedConfi
 
 // Create metric creates metric to be indexed
 func (p *Prometheus) createMetric(query, metricName string, job Job, labels model.Metric, value model.SampleValue, timestamp time.Time, isInstant bool) metric {
+	metadata := map[string]any{}
+	maps.Copy(metadata, p.metadata)
+	if job.IncrementalLoadUUID != "" {
+		metadata["incrementalLoadUUID"] = job.IncrementalLoadUUID
+	}
 	m := metric{
 		Labels:     make(map[string]string),
 		UUID:       p.UUID,
@@ -167,7 +172,7 @@ func (p *Prometheus) createMetric(query, metricName string, job Job, labels mode
 		MetricName: metricName,
 		Timestamp:  timestamp,
 		JobName:    job.JobConfig.Name,
-		Metadata:   p.metadata,
+		Metadata:   metadata,
 	}
 	for k, v := range labels {
 		if k != model.MetricNameLabel {
@@ -179,8 +184,8 @@ func (p *Prometheus) createMetric(query, metricName string, job Job, labels mode
 	} else {
 		m.Value = float64(value)
 	}
-	if job.ChurnStart != nil && job.ChurnEnd != nil {
-		if !isInstant && timestamp.After(*job.ChurnStart) && timestamp.Before(*job.ChurnEnd) {
+	if job.JobConfig.ChurnStart != nil && job.JobConfig.ChurnEnd != nil {
+		if !isInstant && timestamp.After(*job.JobConfig.ChurnStart) && timestamp.Before(*job.JobConfig.ChurnEnd) {
 			m.ChurnMetric = true
 		}
 	}
@@ -200,6 +205,9 @@ func (p *Prometheus) runInstantQuery(query, metricName string, timestamp time.Ti
 	if err = p.parseVector(metricName, query, job, v, &datapoints); err != nil {
 		log.Warnf("Error found parsing result from query %s: %s", query, err)
 	}
+	if len(datapoints) == 0 {
+		log.Warnf("No datapoints returned from metric %s for job %s at %s with query %q", metricName, job.JobConfig.Name, timestamp.Format(time.RFC3339), query)
+	}
 	return datapoints
 }
 
@@ -217,6 +225,9 @@ func (p *Prometheus) runRangeQuery(query, metricName string, jobStart, jobEnd ti
 	if err = p.parseMatrix(metricName, query, job, v, &datapoints); err != nil {
 		log.Warnf("Error found parsing result from query %s: %s", query, err)
 	}
+	if len(datapoints) == 0 {
+		log.Warnf("No datapoints returned from metric %s for job %s in range %s - %s with query %q", metricName, job.JobConfig.Name, jobStart.Format(time.RFC3339), jobEnd.Format(time.RFC3339), query)
+	}
 	return datapoints
 }
 
@@ -228,7 +239,7 @@ func (p *Prometheus) indexDatapoints(docsToIndex map[string][]any) {
 		if err != nil {
 			log.Error(err.Error())
 		} else {
-			log.Info(resp)
+			log.Debug(resp)
 		}
 	}
 }

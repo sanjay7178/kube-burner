@@ -70,11 +70,13 @@ type volumeSnapshotMetric struct {
 	JobName      string `json:"jobName,omitempty"`
 	JobIteration int    `json:"jobIteration"`
 	Replica      int    `json:"replica"`
+	ChurnMetric  bool   `json:"churnMetric,omitempty"`
 	Metadata     any    `json:"metadata,omitempty"`
 }
 
 type volumeSnapshotLatency struct {
 	BaseMeasurement
+	jobNamespaces map[string]struct{}
 }
 
 type volumeSnapshotLatencyMeasurementFactory struct {
@@ -100,6 +102,9 @@ func (vsl *volumeSnapshotLatency) handleCreateVolumeSnapshot(obj any) {
 	volumeSnapshot, err := util.ConvertAnyToTyped[volumesnapshotv1.VolumeSnapshot](obj)
 	if err != nil {
 		log.Errorf("failed to convert to VolumeSnapshot: %v", err)
+		return
+	}
+	if _, ok := vsl.jobNamespaces[volumeSnapshot.Namespace]; !ok {
 		return
 	}
 	vsLabels := volumeSnapshot.GetLabels()
@@ -140,12 +145,17 @@ func (vsl *volumeSnapshotLatency) Start(measurementWg *sync.WaitGroup) error {
 	if err != nil {
 		return fmt.Errorf("error getting GVR for %s: %w", "VolumeSnapshot", err)
 	}
+	// VolumeSnapshots may be created indirectly (e.g., by the kubevirt snapshot
+	// controller via VirtualMachineSnapshot) and won't have kube-burner labels.
+	// Skip the global label selector and filter by namespace in the handlers.
+	vsl.jobNamespaces = getJobNamespaces(vsl.JobConfig)
 	vsl.startMeasurement(
 		[]MeasurementWatcher{
 			{
-				dynamicClient: dynamic.NewForConfigOrDie(vsl.RestConfig),
-				name:          "vsWatcher",
-				resource:      gvr,
+				dynamicClient:      dynamic.NewForConfigOrDie(vsl.RestConfig),
+				name:               "vsWatcher",
+				resource:           gvr,
+				skipGlobalSelector: true,
 				handlers: &cache.ResourceEventHandlerFuncs{
 					AddFunc: vsl.handleCreateVolumeSnapshot,
 					UpdateFunc: func(oldObj, newObj any) {
@@ -220,6 +230,7 @@ func (vsl *volumeSnapshotLatency) normalizeMetrics() float64 {
 			errorFlag = 1
 			m.VSReadyLatency = 0
 		}
+		m.ChurnMetric = vsl.IsChurnMetric(m.Timestamp)
 		volumeSnapshotCount++
 		erroredVolumeSnapshots += errorFlag
 		vsl.NormLatencies = append(vsl.NormLatencies, m)
@@ -241,6 +252,25 @@ func (vsl *volumeSnapshotLatency) getLatency(normLatency any) map[string]float64
 func (vsl *volumeSnapshotLatency) IsCompatible() bool {
 	_, exists := supportedVolumeSnapshotLatencyJobTypes[vsl.JobConfig.JobType]
 	return exists
+}
+
+// getJobNamespaces computes the set of namespaces used by a job, accounting for
+// namespacedIterations and iterationsPerNamespace settings.
+func getJobNamespaces(jobConfig *config.Job) map[string]struct{} {
+	namespaces := make(map[string]struct{})
+	if jobConfig.NamespacedIterations {
+		iterationsPerNs := jobConfig.IterationsPerNamespace
+		if iterationsPerNs <= 0 {
+			iterationsPerNs = 1
+		}
+		for i := range jobConfig.JobIterations {
+			nsIndex := i / iterationsPerNs
+			namespaces[fmt.Sprintf("%s-%d", jobConfig.Namespace, nsIndex)] = struct{}{}
+		}
+	} else {
+		namespaces[jobConfig.Namespace] = struct{}{}
+	}
+	return namespaces
 }
 
 // volumeSnapshotTransformFunc preserves the following fields for latency measurements:
