@@ -89,7 +89,7 @@ func patchHandler(ctx context.Context, ex *JobExecutor, obj *object, originalIte
 	}
 	if err != nil {
 		if errors.IsForbidden(err) {
-			log.Fatalf("Authorization error patching %s/%s: %s", originalItem.GetKind(), originalItem.GetName(), err)
+			log.Errorf("Authorization error patching %s/%s: %s", originalItem.GetKind(), originalItem.GetName(), err)
 		} else {
 			log.Errorf("Error patching object %s/%s in namespace %s: %s", originalItem.GetKind(),
 				originalItem.GetName(), ns, err)

@@ -35,9 +35,6 @@ func CreateNamespace(clientSet kubernetes.Interface, name string, nsLabels map[s
 	}
 	return RetryWithExponentialBackOff(func() (done bool, err error) {
 		_, err = clientSet.CoreV1().Namespaces().Create(context.TODO(), &ns, metav1.CreateOptions{})
-		if errors.IsForbidden(err) {
-			log.Fatalf("authorization error creating namespace %s: %s", ns.Name, err)
-		}
 		if errors.IsAlreadyExists(err) {
 			log.Debugf("Namespace %s already exists", ns.Name)
 			nsSpec, _ := clientSet.CoreV1().Namespaces().Get(context.TODO(), name, metav1.GetOptions{})
