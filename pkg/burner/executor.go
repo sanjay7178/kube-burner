@@ -57,7 +57,6 @@ type JobExecutor struct {
 	embedCfg          *fileutils.EmbedConfiguration
 	mapper            *restmapper.DeferredDiscoveryRESTMapper
 	deletionStrategy  string
-	objectOperations  int32
 	nsChurning        bool
 	hookManager       *HookManager
 }
@@ -73,8 +72,7 @@ func newExecutor(configSpec config.Spec, kubeClientProvider *config.KubeClientPr
 		functionTemplates: configSpec.GlobalConfig.FunctionTemplates,
 		embedCfg:          embedCfg,
 		deletionStrategy:  configSpec.GlobalConfig.DeletionStrategy,
-		objectOperations:  0,
-		hookManager:       NewHookManager(context.Background(), len(job.Hooks)),
+		hookManager:       NewHookManager(context.Background(), len(job.Hooks), embedCfg),
 	}
 
 	clientSet, runtimeRestConfig := kubeClientProvider.ClientSet(job.QPS, job.Burst)
