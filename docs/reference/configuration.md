@@ -507,9 +507,8 @@ The `when` field specifies at which stage the hook should execute:
 | Stage                    | Description                                           |
 |--------------------------|-------------------------------------------------------|
 | `beforeJobExecution`     | Before job objects are created                        |
-| `afterJobExecution`      | After job objects are created (before churning)       |
 | `onEachIteration`        | On each job iteration                                 |
-| `beforeChurn`            | Before churn operation starts                         |
+| `afterJobExecution`      | After job objects are created (before churning)       |
 | `afterChurn`             | After churn operation completes                       |
 | `beforeCleanup`          | Before cleanup/deletion begins                        |
 | `afterCleanup`           | After cleanup/deletion completes                      |
@@ -616,7 +615,7 @@ hooks:
 ```yaml
 hooks:
   - cmd: ["/scripts/collect-churn-metrics.sh"]
-    when: beforeChurn
+    when: afterJobExecution
     background: true
 ```
 
@@ -988,6 +987,8 @@ Each object supports the following fields within the `group` block:
 
 !!! note
     When multiple objects in a group specify `pauseBeforeGC` or `pauseAfterGC`, the maximum value is used. `pauseBeforeGC` applies even without `gc: true` (acting as an inter-group delay), while `pauseAfterGC` only applies when at least one object has `gc: true`. Objects with `gc: true` are skipped during object verification.
+
+When metrics are collected during grouped execution, any range query datapoints that fall within a group's execution timeframe will have a `groupId` field, set to the group number, added to their `metadata` in the indexed metrics. This allows for identification of metrics captured during a specific group's execution for analysis purposes.
 
 ### Example
 
