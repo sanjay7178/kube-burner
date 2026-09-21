@@ -44,6 +44,7 @@ In this section is described global job configuration, it holds the following pa
 | `timeout` | Global benchmark timeout                                             | Duration        | 4hr      |
 | `functionTemplates` | Function template files to render at runtime                                             | List        | []      |
 | `deletionStrategy` | Global deletion strategy to apply, `default` or `gvr` (where `default` deletes entire namespaces and `gvr` deletes objects within namespaces)   | String   | default  |
+| `hooks`            | List of global hooks to execute before/after all jobs. See [hooks section](#hooks)                      | List     | []       |
 
 !!! note
     The precedence order to wait on resources is Global.waitWhenFinished > Job.waitWhenFinished > Job.podWait
@@ -488,32 +489,46 @@ This will create both the Gateway and VirtualService for each iteration, with pr
 
 ### Hooks
 
-Hooks allow you to execute external commands at various stages of job execution. They support both foreground (blocking) and background (non-blocking) execution modes.
+Hooks allow you to execute external commands at various stages of execution. They support both foreground (blocking) and background (non-blocking) execution modes. Kube-burner supports two types of hooks:
+
+- **Global hooks**: Run before/after all jobs, configured in the `global` section
+- **Job-level hooks**: Run at specific stages of individual job execution
 
 #### Hook Configuration
 
-Hooks are configured as a list under the `hooks` field in a job:
+Hooks are configured as a list under the `hooks` field:
 
-| Option       | Description                                             | Type     | Default |
-|--------------|---------------------------------------------------------|----------|---------|
-| `cmd`        | Command and arguments to execute                        | List     | []      |
-| `when`       | Execution stage for the hook                            | String   | ""      |
-| `background` | Run hook in background (non-blocking)                   | Boolean  | false   |
+| Option       | Description                                                                                          | Type     | Default |
+|--------------|------------------------------------------------------------------------------------------------------|----------|---------|
+| `cmd`        | Command and arguments to execute. For [embedded scripts](#embedded-script-support), the first element is the script name and the rest are script arguments. | List     | []      |
+| `when`       | Execution stage for the hook                                                                         | String   | ""      |
+| `background` | Run hook in background (non-blocking)                                                                | Boolean  | false   |
 
 #### Supported Hook Stages
 
 The `when` field specifies at which stage the hook should execute:
 
-| Stage                    | Description                                           |
-|--------------------------|-------------------------------------------------------|
-| `beforeJobExecution`     | Before job objects are created                        |
-| `onEachIteration`        | On each job iteration                                 |
-| `afterJobExecution`      | After job objects are created (before churning)       |
-| `afterChurn`             | After churn operation completes                       |
-| `beforeCleanup`          | Before cleanup/deletion begins                        |
-| `afterCleanup`           | After cleanup/deletion completes                      |
-| `beforeGC`               | Before garbage collection                             |
-| `afterGC`                | After garbage collection                              |
+**Global Hook Stages** (configured in `global.hooks`):
+
+| Stage            | Description                                                                 |
+|------------------|-----------------------------------------------------------------------------|
+| `beforeAllJobs`  | Before any job or measurement starts                                         |
+| `afterAllJobs`   | After the benchmark execution regardless of test success or failure         |
+
+**Job-Level Hook Stages** (configured in `jobs[].hooks`):
+
+| Stage                    | Description                                                                                          |
+|--------------------------|------------------------------------------------------------------------------------------------------|
+| `beforeJobExecution`     | Before the job starts creating or processing objects                                                 |
+| `onEachIteration`        | At the start of each iteration of a create job                                                       |
+| `afterJobExecution`      | After the job finishes creating or processing objects (before churn, if enabled)                     |
+| `beforeChurn`            | Before churn starts in create jobs with churn enabled. Please note that some actions may occur between afterJobExecution and this phase                                                    
+|
+| `afterChurn`             | After churn completes on create jobs with churn enabled                                              |
+| `beforeCleanup`          | After the job finishes, before job pause and optional garbage collection                             |
+| `afterCleanup`           | After per-job garbage collection (`gc: true`), or after global GC when `gcMetrics` is enabled        |
+| `beforeGC`               | Before cleanup of leftover namespaces from previous runs (job `cleanup: true`)                       |
+| `afterGC`                | After cleanup of leftover namespaces from previous runs (job `cleanup: true`)                        |
 
 #### Execution Behavior
 
@@ -522,43 +537,74 @@ The `when` field specifies at which stage the hook should execute:
 - Execute sequentially in the order defined
 - Block job execution until completion
 - No timeout by default (respects parent context cancellation only)
-- Errors cause job to fail
+- Errors cause the job to fail immediately
 
 **Background Hooks** (`background: true`):
 
 - All background hooks for a stage start in parallel
-- Job execution continues immediately
-- Results are collected at the end of the job execution
-- Errors are reported but don't block execution
+- Job execution continues immediately without waiting for them
+- Results are collected after all hook stages of the job complete
+- Errors do not interrupt the running job; they are reported at the end and included in the return code
 - Properly cleaned up when parent context is cancelled
 
 **Execution Order:**
 
 1. All background hooks for the stage start in parallel
 2. Foreground hooks execute sequentially after background hooks start
-3. Background hooks are waited on before proceeding to the next major phase
+3. The job continues without waiting for background hooks. They are waited on after all stages of the job complete
 
 #### Embedded Script Support
 
-When using kube-burner-ocp or any application with an embedded filesystem, hooks can reference scripts stored in the embedded `scripts` directory. When a hook command invokes `bash` or `sh` with a script file (e.g., `["bash", "my-script.sh", "arg1"]`), kube-burner will:
+When using kube-burner-ocp or any application with an embedded filesystem, hooks can reference scripts stored in that filesystem. The directory name is configured by the wrapper when it calls `workloads.NewWorkloadHelper()` (commonly `scripts`; see [wrappers](../wrappers/wrappers.md)).
 
-1. If the script path is absolute, execute it directly
-2. If the script exists in the current working directory, execute it directly
-3. If not found locally, look for it in the embedded filesystem's scripts directory
-
-This allows workload authors to bundle scripts with their configurations without requiring users to manually extract or copy them. Local scripts always take precedence over embedded scripts.
-
-Example using an embedded script:
+Set `cmd` to the script name followed by any arguments. Do not prefix the command with `bash` or `sh`; kube-burner runs embedded scripts with `/bin/bash`:
 
 ```yaml
 jobs:
   - name: my-workload
     hooks:
-      - cmd: ["bash", "setup-environment.sh", "--config", "production"]
+      - cmd: ["setup-environment.sh", "--config", "production"]
         when: beforeJobExecution
 ```
 
+kube-burner resolves the first element of `cmd` as follows:
+
+1. If the path is absolute, execute the command directly as given
+2. If a matching file exists in the current working directory, execute the command directly as given
+3. Otherwise, load the script from the embedded scripts directory configured by the wrapper and execute it with `/bin/bash -s -`. Remaining `cmd` entries are passed as positional arguments (`$1`, `$2`, ...)
+
+Local files always take precedence over embedded scripts. This allows workload authors to bundle scripts with their configurations without requiring users to extract them.
+
 #### Example Configuration
+
+**Global hooks example:**
+
+```yaml
+global:
+  hooks:
+    # Run setup script before any job starts
+    - cmd: ["/scripts/cluster-setup.sh"]
+      when: beforeAllJobs
+      background: false
+
+    # Start monitoring in background for entire benchmark
+    - cmd: ["/scripts/collect-metrics.sh", "--output=/data"]
+      when: beforeAllJobs
+      background: true
+
+    # Run cleanup after all jobs complete
+    - cmd: ["/scripts/final-cleanup.sh"]
+      when: afterAllJobs
+      background: false
+
+jobs:
+  - name: job-1
+    # ...
+  - name: job-2
+    # ...
+```
+
+**Job-level hooks example:**
 
 ```yaml
 jobs:
@@ -566,34 +612,44 @@ jobs:
     jobType: create
     jobIterations: 100
     namespace: workload-ns
-    
+
     hooks:
       # Background monitoring hook - runs throughout deployment
-      - cmd: ["/bin/bash", "/scripts/monitor-resources.sh"]
+      - cmd: ["/bin/bash", "/usr/local/bin/monitor-resources.sh"]
         when: beforeJobExecution
         background: true
-      
+
       # Foreground setup hook - blocks until complete
       - cmd: ["/usr/bin/setup-environment.sh", "--mode=production"]
         when: beforeJobExecution
         background: false
-      
+
       # Per-iteration hook
-      - cmd: ["/bin/bash", "/scripts/log-iteration.sh"]
+      - cmd: ["/bin/bash", "/usr/local/bin/log-iteration.sh"]
         when: onEachIteration
         background: false
-      
+
       # Cleanup verification
-      - cmd: ["/scripts/verify-cleanup.sh"]
+      - cmd: ["/usr/local/bin/verify-cleanup.sh"]
         when: afterCleanup
         background: false
-    
+
     objects:
       - objectTemplate: deployment.yml
         replicas: 10
 ```
 
 #### Use Cases
+
+**Global benchmark setup and teardown:**
+```yaml
+global:
+  hooks:
+    - cmd: ["/scripts/prepare-cluster.sh"]
+      when: beforeAllJobs
+    - cmd: ["/scripts/generate-report.sh"]
+      when: afterAllJobs
+```
 
 **Long-running background monitoring:**
 ```yaml
@@ -606,7 +662,7 @@ hooks:
 **VM provisioning and readiness:**
 ```yaml
 hooks:
-  - cmd: ["/scripts/provision-vm.sh", "--wait-ready"]
+  - cmd: ["/usr/local/bin/provision-vm.sh", "--wait-ready"]
     when: beforeJobExecution
     background: false  # No timeout, waits as long as needed
 ```
@@ -614,32 +670,32 @@ hooks:
 **Data collection during churn:**
 ```yaml
 hooks:
-  - cmd: ["/scripts/collect-churn-metrics.sh"]
-    when: afterJobExecution
+  - cmd: ["/usr/local/bin/collect-churn-metrics.sh"]
+    when: beforeChurn
     background: true
 ```
 
 **Sequential cleanup verification:**
 ```yaml
 hooks:
-  - cmd: ["/scripts/check-resources.sh"]
+  - cmd: ["/usr/local/bin/check-resources.sh"]
     when: afterCleanup
     background: false
 ```
 
 #### Best Practices
 
-1. **Use background hooks for monitoring** - Start monitoring/data collection in the background while workload runs
+1. **Use background hooks for monitoring** - Start monitoring/data collection in the background while the workload runs
 2. **Use foreground hooks for setup** - Block execution for critical setup steps
-3. **Handle errors appropriately** - Foreground hook failures will fail the job
-4. **Use absolute paths** - Specify full paths to executables and scripts
-5. **Keep hooks lightweight for `onEachIteration`** - This runs for every iteration
+3. **Handle errors appropriately** - Foreground hook failures fail the job immediately; background hook failures fail it after the job completes
+4. **Choose the right path form** - Use absolute paths for local executables. Use a relative script name (without `bash`/`sh`) for scripts bundled in an embedded filesystem
+5. **Keep hooks lightweight for `onEachIteration`** - This runs at the start of every create-job iteration
 
 #### Error Handling
 
 - **Foreground hooks**: Errors stop job execution and are reported immediately
 - **Background hooks**: Errors are collected and reported after job completion
-- All hook errors are included in job summary and return code
+- All hook errors are included in the job summary and return code
 
 ## Job types
 

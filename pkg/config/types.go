@@ -28,12 +28,16 @@ type JobHook string
 const (
 	HookBeforeJobExecution JobHook = "beforeJobExecution"
 	HookAfterJobExecution  JobHook = "afterJobExecution"
+	HookBeforeChurn        JobHook = "beforeChurn"
 	HookAfterChurn         JobHook = "afterChurn"
 	HookBeforeCleanup      JobHook = "beforeCleanup"
 	HookAfterCleanup       JobHook = "afterCleanup"
 	HookBeforeGC           JobHook = "beforeGC"
 	HookAfterGC            JobHook = "afterGC"
 	HookOnEachIteration    JobHook = "onEachIteration"
+	// Global hooks - not tied to any specific job
+	HookBeforeAllJobs JobHook = "beforeAllJobs"
+	HookAfterAllJobs  JobHook = "afterAllJobs"
 )
 
 // JobType type of job
@@ -115,6 +119,8 @@ type GlobalConfig struct {
 	FunctionTemplates []string `yaml:"functionTemplates"`
 	// DeletionStrategy global deletion strategy for all created objects
 	DeletionStrategy string `yaml:"deletionStrategy" json:"deletionStrategy,omitempty"`
+	// Hooks global hooks to execute before/after all jobs
+	Hooks []Hook `yaml:"hooks" json:"hooks,omitempty"`
 }
 
 // ObjectGroup controls grouping and per-object lifecycle behavior within grouped execution
@@ -290,6 +296,8 @@ type IncrementalLoad struct {
 	Pattern LoadPattern `yaml:"pattern" json:"pattern,omitempty"`
 	// HealthCheckScript optional shell script to run as a health check between steps
 	HealthCheckScript string `yaml:"healthCheckScript" json:"healthCheckScript,omitempty"`
+	// ScrapeMetricsPerStep scrape prometheus metrics after each incremental step
+	ScrapeMetricsPerStep bool `yaml:"scrapeMetricsPerStep" json:"scrapeMetricsPerStep,omitempty"`
 }
 
 type LoadPattern struct {
